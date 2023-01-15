@@ -15,6 +15,27 @@ import (
 	env "github.com/Netflix/go-env"
 )
 
+// Wrapper for responses from graphiql
+type GraphqlResponse struct {
+	Data   map[string]interface{}
+	Errors []error
+}
+
+func (g *GraphqlResponse) HasErrors() bool {
+	if len(g.Errors) > 0 {
+		return true
+	}
+	return false
+}
+
+type QueryError struct {
+	message string
+}
+
+func (qe QueryError) Error() string {
+	return qe.message
+}
+
 // Wraps the json returned by "/api/auth/token?token=" route
 type Token struct {
 	Sub          string                 `json:"sub"`
@@ -53,7 +74,7 @@ func NewClient(campusEndpoint string) (Client, error) {
 		return c, err
 	}
 
-	resp, err := http.Get(fmt.Sprintf("https://%s/api/auth/token?token=%s", campusEndpoint, c.GiteaToken))
+	resp, err := http.Get("https://" + campusEndpoint + "/api/auth/token?token=" + c.GiteaToken)
 	if err != nil {
 		return c, err
 	}
@@ -70,56 +91,6 @@ func NewClient(campusEndpoint string) (Client, error) {
 	token, err := parseToken(body)
 	c.Token = token
 	return c, err
-}
-
-// Run a request on intra graphql API
-func (c *Client) GraphqlQuery(query string) (map[string]interface{}, error) {
-	c.Lock()
-	defer c.Unlock()
-	var responseData map[string]interface{}
-
-	data := map[string]interface{}{
-		"query": query,
-	}
-
-	body, err := json.Marshal(data)
-	req, err := http.NewRequest("POST",
-		"https://"+c.Endpoint+"/api/graphql-engine/v1/graphql",
-		bytes.NewBuffer(body))
-	if err != nil {
-		return responseData, err
-	}
-
-	headers := map[string]interface{}{
-		"Authorization":  "Bearer " + string(c.RawToken),
-		"Content-Type":   "application/json",
-		"Content-Length": strconv.Itoa(len(query)),
-	}
-
-	for k, v := range headers {
-		req.Header.Set(k, v.(string))
-	}
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return responseData, err
-	} else if resp.StatusCode != http.StatusOK {
-		return responseData, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return responseData, err
-	}
-
-	err = json.Unmarshal(bodyBytes, &responseData)
-	if err != nil {
-		return responseData, err
-	}
-
-	return responseData, nil
 }
 
 // Sleep until token is expired and fetches a new one, rince, repeat ;)
@@ -170,4 +141,79 @@ func (c *Client) Refresh() error {
 	c.RawToken = body
 	c.Token, err = parseToken(body)
 	return err
+}
+
+// Run a request on intra graphql API
+func (c *Client) GraphqlQuery(query string) GraphqlResponse {
+	c.Lock()
+	defer c.Unlock()
+
+	var responseData map[string]interface{}
+	var g GraphqlResponse
+
+	data := map[string]interface{}{
+		"query": query,
+	}
+
+	body, err := json.Marshal(data)
+	req, err := http.NewRequest("POST",
+		"https://"+c.Endpoint+"/api/graphql-engine/v1/graphql",
+		bytes.NewBuffer(body))
+	if err != nil {
+		g.Errors = append(g.Errors, err)
+		return g
+	}
+
+	headers := map[string]interface{}{
+		"Authorization":  "Bearer " + string(c.RawToken),
+		"Content-Type":   "application/json",
+		"Content-Length": strconv.Itoa(len(query)),
+	}
+
+	for k, v := range headers {
+		req.Header.Set(k, v.(string))
+	}
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		g.Errors = append(g.Errors, err)
+		return g
+	} else if resp.StatusCode != http.StatusOK {
+		g.Errors = append(g.Errors, QueryError{
+			fmt.Sprintf("unexpected status code: %d", resp.StatusCode),
+		})
+		return g
+
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		g.Errors = append(g.Errors, err)
+		return g
+	}
+
+	err = json.Unmarshal(bodyBytes, &responseData)
+	if err != nil {
+		g.Errors = append(g.Errors, err)
+		return g
+	}
+
+	if errors, _ := responseData["errors"].([]map[string]map[string]string); len(errors) > 0 {
+		for _, e := range errors {
+			qe := QueryError{e["errors"]["message"]}
+			g.Errors = append(g.Errors, qe)
+		}
+		return g
+	}
+	data, ok := responseData["data"].(map[string]interface{})
+	if !ok {
+		g.Errors = append(g.Errors, QueryError{
+			fmt.Sprintf("unexpected type for  \"data\". Expected: map[string]interface, received: %T", responseData["data"]),
+		})
+		return g
+	}
+	g.Data = data
+	return g
 }
