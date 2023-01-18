@@ -15,6 +15,8 @@ import (
 	env "github.com/Netflix/go-env"
 )
 
+type Vars map[string]interface{}
+
 // Wrapper for responses from graphiql
 type GraphqlResponse struct {
 	Data   map[string]interface{}
@@ -144,7 +146,7 @@ func (c *Client) Refresh() error {
 }
 
 // Run a request on intra graphql API
-func (c *Client) GraphqlQuery(query string) GraphqlResponse {
+func (c *Client) GraphqlQuery(query string, variables Vars) GraphqlResponse {
 	c.Lock()
 	defer c.Unlock()
 
@@ -152,7 +154,8 @@ func (c *Client) GraphqlQuery(query string) GraphqlResponse {
 	var g GraphqlResponse
 
 	data := map[string]interface{}{
-		"query": query,
+		"query":     query,
+		"variables": variables,
 	}
 
 	body, err := json.Marshal(data)
@@ -196,6 +199,7 @@ func (c *Client) GraphqlQuery(query string) GraphqlResponse {
 
 	err = json.Unmarshal(bodyBytes, &responseData)
 	if err != nil {
+		fmt.Println(err)
 		g.Errors = append(g.Errors, err)
 		return g
 	}
@@ -207,13 +211,6 @@ func (c *Client) GraphqlQuery(query string) GraphqlResponse {
 		}
 		return g
 	}
-	data, ok := responseData["data"].(map[string]interface{})
-	if !ok {
-		g.Errors = append(g.Errors, QueryError{
-			fmt.Sprintf("unexpected type for  \"data\". Expected: map[string]interface, received: %T", responseData["data"]),
-		})
-		return g
-	}
-	g.Data = data
+	g.Data = responseData["data"].(map[string]interface{})
 	return g
 }
