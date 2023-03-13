@@ -53,6 +53,9 @@ func parseToken(rawToken []byte) (Token, error) {
 	var token Token
 
 	stripped := strings.Split(string(rawToken), ".")
+	if len(stripped) < 2 {
+		return nil,log.Errorf("invalid token")
+	}
 	rawStrippedToken, err := base64.StdEncoding.DecodeString(stripped[1])
 	err = json.Unmarshal([]byte(rawStrippedToken), &token)
 	return token, err
