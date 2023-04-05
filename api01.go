@@ -2,17 +2,16 @@ package api01
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"net/http"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
 	env "github.com/Netflix/go-env"
+	"github.com/golang-jwt/jwt/v5"
 )
 
 type Vars map[string]interface{}
@@ -39,23 +38,13 @@ func (qe QueryError) Error() string {
 }
 
 // Wraps the json returned by "/api/auth/token?token=" route
-type Token struct {
-	Sub          string                 `json:"sub"`
-	Iat          int64                  `json:"iat"`
-	Exp          int64                  `json:"exp"`
-	IP           string                 `json:"ip"`
-	Campuses     map[string]interface{} `json:"x-hasura-campuses"`
-	HasuraClaims map[string]interface{} `json:"https://hasura.io/jwt/claims"`
-}
 
 // Parse & unmarshal raw bytes into a token
-func parseToken(rawToken []byte) (Token, error) {
-	var token Token
-
-	stripped := strings.Split(string(rawToken), ".")
-	rawStrippedToken, err := base64.StdEncoding.DecodeString(stripped[1])
-	err = json.Unmarshal([]byte(rawStrippedToken), &token)
-	return token, err
+func parseToken(rawToken []byte) (jwt.Claims) {
+	token, _ := jwt.Parse(string(rawToken), func(token *jwt.Token) (interface{}, error){ 
+		return []byte(""), nil
+	})
+	return token.Claims
 }
 
 //The client object used to requests to graphql
@@ -64,7 +53,7 @@ type Client struct {
 	Endpoint   string
 	GiteaToken string `env:"API01_GITEA_TOKEN"`
 	RawToken   []byte
-	Token      Token
+	Token     jwt.Claims 
 }
 
 // Fetches a token from intra and returns a client object
@@ -85,12 +74,12 @@ func NewClient(campusEndpoint string) (Client, error) {
 	if err != nil {
 		return c, err
 	}
-
+	
 	// Strip double quotes and save raw token for requests
 	body = body[1 : len(body)-1]
 	c.RawToken = body
 
-	token, err := parseToken(body)
+	token := parseToken(body)
 	c.Token = token
 	return c, err
 }
@@ -101,8 +90,12 @@ func (c *Client) RefreshLoop() error {
 	for true {
 		now := time.Now()
 		sec := now.Unix()
-		time.Sleep(time.Second * time.Duration(c.Token.Exp-sec))
-		err := c.Refresh()
+		exp, err := c.Token.GetExpirationTime()
+		if err != nil {
+			return err
+		}
+		_, _ = sec, exp
+		time.Sleep(time.Second * exp.Sub(now))
 		if err != nil {
 			return err
 		}
@@ -141,7 +134,7 @@ func (c *Client) Refresh() error {
 
 	body = body[1 : len(body)-1]
 	c.RawToken = body
-	c.Token, err = parseToken(body)
+	c.Token = parseToken(body)
 	return err
 }
 
@@ -199,7 +192,6 @@ func (c *Client) GraphqlQuery(query string, variables Vars) GraphqlResponse {
 
 	err = json.Unmarshal(bodyBytes, &responseData)
 	if err != nil {
-		fmt.Println(err)
 		g.Errors = append(g.Errors, err)
 		return g
 	}
